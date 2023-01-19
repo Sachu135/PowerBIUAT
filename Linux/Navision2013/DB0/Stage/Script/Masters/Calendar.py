@@ -1,91 +1,82 @@
-from pyspark.sql import SparkSession
-from pyspark import SparkContext
-from pyspark.conf import SparkConf
-from pyspark.sql import SQLContext
+from pyspark.sql import SparkSession,SQLContext
+from pyspark import SparkConf, SparkContext
 from pyspark.sql.types import *
-from pyspark.sql.functions import col,lit,concat,month,year,substring,when,ceil,min as min_,max as max_,from_unixtime,from_utc_timestamp,unix_timestamp,udf
-from datetime import timedelta, date
-import re,os
-import datetime,time,sys
-import traceback
-import os,sys,subprocess
+import pyspark.sql.functions as F
+import os,sys
 from os.path import dirname, join, abspath
-from distutils.command.check import check
-
-helpersDir = '/home/padmin/KockpitStudio'
-sys.path.insert(0, helpersDir)
-from ConfigurationFiles.AppConfig import *
-from Helpers.Constants import *
-from Helpers.udf import *
 import datetime as dt
+root_directory =abspath(join(join(dirname(__file__), '..'),'..','..','..',))
+root_directory=root_directory+"/"
 
-def masters_calendar(sqlCtx, spark):
-    st = dt.datetime.now()
-    logger = Logger()
-
+DBList=[]
+for folders in os.listdir(root_directory):
+    if os.path.isdir(os.path.join(root_directory,folders)):
+        if 'DB' in folders:
+            if 'DB0' in folders:
+                pass
+            else:
+                DBList.insert(0,folders )
+Connection =abspath(join(join(dirname(__file__), '..'),'..','..','..',DBList[0]))
+sys.path.insert(0, Connection)
+from Configuration.Constant import *
+from Configuration.udf import *
+Abs_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..')) 
+Kockpit_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..'))
+DBO_Path=abspath(join(join(dirname(__file__), '..'),'..','..'))
+DB0 =os.path.split(DBO_Path)
+DB0 = DB0[1]
+owmode = 'overwrite'
+apmode = 'append'                           
+st = dt.datetime.now()
+sqlCtx,spark=getSparkConfig(SPARK_MASTER, "StageDB0:Masters-Calendar")
+def masters_calendar():
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
+    ConfTab='tblCompanyName'
     try:
-        for entityObj in config["DbEntities"]:
-            logger = Logger()
-            entityLocation = entityObj["Location"]
-            DBName = entityLocation[:3]
-            EntityName = entityLocation[-2:]
+        finalDF = spark.createDataFrame([], StructType([]))
+        Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+        CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+        CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+        for d in range(len(DBList)):  
+            DB=DBList[d]
+            logger =Logger()
+            Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+            CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['DBName']==DB))
+            NoofRows = CompanyDetail.count()  
             
-            hdfspath = STAGE1_PATH + "/" + entityLocation
-            postgresUrl = PostgresDbInfo.url.format(entityLocation)
-            
-            Calendar_StartDate = '2018-04-01'
-            Calendar_StartDate = datetime.datetime.strptime(Calendar_StartDate,"%Y-%m-%d").date()
-            Calendar_EndDate = datetime.datetime.today().date()
-            
-            
-            data =[]
-            for single_date in DRANGE(Calendar_StartDate, Calendar_EndDate):
-                data.append({'Link_date':single_date})
-            
-            
-            
-            schema = StructType([
-            StructField("Link_date", DateType(),True)
-            ])
-            
-            records=spark.createDataFrame(data,schema)
-            
-            
-            records=records.select(records.Link_date.alias('LinkDate'),month(records.Link_date).alias('Month'),year(records.Link_date).alias('Year')).distinct().sort('LinkDate')
-            
-            records = records.withColumn("Fiscal_Monthno",when(records.Month>(int(MnSt)-1),records.Month-int(MnSt)+1).otherwise(records.Month+(13-int(MnSt))))\
-                        .withColumn("Fiscal_Year",when(records.Month>(int(MnSt)-1),concat(records.Year,lit('-'),substring(records.Year+1,3,2))).otherwise(concat(records.Year-1,lit('-'),substring(records.Year,3,2))))\
-                        .withColumn("FY_Year",when(records.Month>(int(MnSt)-1),records.Year).otherwise(records.Year-1))
-            
-            records = records.na.fill({'LinkDate':'NA'})
-            records = records.withColumn("Fiscal_Quarter",when(records.Month>(int(MnSt)-1),concat(lit("Q"),ceil((records.Month-int(MnSt)+1)/3))).otherwise(concat(lit("Q"),ceil((records.Month+(13-int(MnSt)))/3))))
-            
-            ######### ADDED ARoy 13 May 3 lines
-            records = records.withColumn("LinkDateKey",concat(lit(DBName),lit("|"),lit(EntityName),lit("|"),records.LinkDate))\
-                .withColumn("DBName",lit(DBName))\
-                .withColumn("EntityName",lit(EntityName))
-            
-            
-            records = records.withColumn("Fiscal_Month",when(records.Month == 1,"Jan").when(records.Month == 2,"Feb").when(records.Month == 3,"Mar").when(records.Month == 4,"Apr").when(records.Month == 5,"May").when(records.Month == 6,"Jun").when(records.Month == 7,"Jul").when(records.Month == 8,"Aug").when(records.Month == 9,"Sep").when(records.Month == 10,"Oct").when(records.Month == 11,"Nov").when(records.Month == 12,"Dec").otherwise('null'))
-            records = records.withColumn("Reload_Time",lit(datetime.datetime.now()))
-            # records.show()
-            # df_train = records.withColumn("dates", from_unixtime(unix_timestamp(records.LinkDate, 'MMMMM dd  yyy')))
-            # month_udf = udf(lambda x: datetime.strptime(x, '%Y-%m-%d %H:%M:%S').strftime("%B"), returnType = StringType())
-            # dftest = records.withColumn("monthname", month_udf(df_train.dates))
-            # dftest.show()
-            
-            records.write.jdbc(url=postgresUrl, table="masters.Calendar", mode="overwrite", properties=PostgresDbInfo.props)
-          
-            logger.endExecution()
+            for i in range(NoofRows): 
                 
-            try:
-                IDEorBatch = sys.argv[1]
-            except Exception as e :
-                IDEorBatch = "IDLE"
-        
-            log_dict = logger.getSuccessLoggedRecord("Calendar", DBName, EntityName, records.count(), len(records.columns), IDEorBatch)
-            log_df = spark.createDataFrame(log_dict, logger.getSchema())
-            log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
+                    DBName=(CompanyDetail.collect()[i]['DBName'])
+                    EntityName =(CompanyDetail.collect()[i]['NewCompanyName'])
+                    CompanyName=(CompanyDetail.collect()[i]['CompanyName'])
+                    DBE=DBName+EntityName
+                    CompanyName=CompanyName.replace(" ","")
+                    Path = HDFS_PATH+DIR_PATH+"/"+DBName+"/"+EntityName+"/Stage2/ParquetData/Masters/Calendar"
+                    fe = fs.exists(spark._jvm.org.apache.hadoop.fs.Path(Path))
+                    if(fe):
+                        finalDF1=spark.read.format("delta").load(Path)
+                        if (d==0) & (i==0):
+                            finalDF=finalDF1
+                            
+                        else:
+                            finalDF=finalDF.unionByName(finalDF1,allowMissingColumns=True)
+                            
+                    else:
+                        print("Calendar "+DBName+EntityName+" Does not exist")
+        finalDF.write.jdbc(url=PostgresDbInfo.PostgresUrl , table="Masters.Calendar", mode=owmode, properties=PostgresDbInfo.props)
+        logger.endExecution()
+        try:
+            IDEorBatch = sys.argv[1]
+        except Exception as e :
+            IDEorBatch = "IDLE"
+    
+        log_dict = logger.getSuccessLoggedRecord("Masters.Calendar", DB0, "", finalDF.count(), len(finalDF.columns), IDEorBatch)
+        log_df = spark.createDataFrame(log_dict, logger.getSchema())
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)                 
     except Exception as ex:
         exc_type,exc_value,exc_traceback=sys.exc_info()
         print("Error:",ex)
@@ -94,17 +85,15 @@ def masters_calendar(sqlCtx, spark):
         print("Error Line No. - "+str(exc_traceback.tb_lineno))
         ex = str(ex)
         logger.endExecution()
-
         try:
             IDEorBatch = sys.argv[1]
         except Exception as e :
             IDEorBatch = "IDLE"
-        
-        log_dict = logger.getErrorLoggedRecord('Calendar', '', '', ex, exc_traceback.tb_lineno, IDEorBatch)
+        DBE=DBName+EntityName
+        os.system("spark-submit "+Kockpit_Path+"\Email.py 1 Calendar "+CompanyName+" "" "+str(exc_traceback.tb_lineno)+"")   
+        log_dict = logger.getErrorLoggedRecord('Masters.Calendar', DB0, "" , str(ex), exc_traceback.tb_lineno, IDEorBatch)
         log_df = spark.createDataFrame(log_dict, logger.getSchema())
-        log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-    print('masters_calendar completed: ' + str((dt.datetime.now()-st).total_seconds()))
-    
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)        
+    print('masters Calendar completed: ' + str((dt.datetime.now()-st).total_seconds()))      
 if __name__ == "__main__":
-    sqlCtx, spark = getSparkConfig(SPARK_MASTER, "Stage2:Calendar")
-    masters_calendar(sqlCtx, spark)
+    masters_calendar()   

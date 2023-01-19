@@ -1,94 +1,81 @@
-'''
-Created on 7 Jan 2020
-@author: Jaydip
-'''
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession,SQLContext
 from pyspark import SparkConf, SparkContext
-from pyspark.sql import SQLContext
-import csv, io,re,keyring,os,datetime
-from datetime import timedelta, date
-from pyspark.sql.functions import col,max as max_,concat,concat_ws,year,when,month,to_date,lit,quarter,expr,sum,datediff,length,ltrim
-import datetime,time,sys,calendar
 from pyspark.sql.types import *
-import re
-from builtins import str
-import pandas as pd
-import traceback
-import os,sys,subprocess
+import pyspark.sql.functions as F
+import os,sys
 from os.path import dirname, join, abspath
-from distutils.command.check import check
 import datetime as dt
-
-
-
-'''
-from pathlib import Path
-p = list(Path(os.getcwd()).parts)
-helpersDir = '/' + p[1] + '/' + p[2] #root/KockpitStudio'
-'''
-helpersDir = '/home/padmin/KockpitStudio'
-sys.path.insert(0, helpersDir)
-from ConfigurationFiles.AppConfig import *
-from Helpers.Constants import *
-from Helpers.udf import *
-from Helpers.DBInfo import *
-
-# def RENAME_Columns(df,old_columns,new_columns):
-#
-        # df= df.toDF(*new_columns)
-        # return df
-
-def RENAME_OLD (df,old_columns,new_columns):
-    for i in range(len(old_columns)):
-      if(new_columns[i]!=" "):
-       df = df.withColumnRenamed(old_columns[i], new_columns[i])
-    return df
-     
-def masters_customers(sqlCtx, spark):
-    st = dt.datetime.now()
-    logger = Logger()
-
+root_directory =abspath(join(join(dirname(__file__), '..'),'..','..','..',))
+root_directory=root_directory+"/"
+DBList=[]
+for folders in os.listdir(root_directory):
+    if os.path.isdir(os.path.join(root_directory,folders)):
+        if 'DB' in folders:
+            if 'DB0' in folders:
+                pass
+            else:
+                DBList.insert(0,folders )
+Connection =abspath(join(join(dirname(__file__), '..'),'..','..','..',DBList[0]))
+sys.path.insert(0, Connection)
+from Configuration.Constant import *
+from Configuration.udf import *
+Abs_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..')) 
+Kockpit_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..'))
+DBO_Path=abspath(join(join(dirname(__file__), '..'),'..','..'))
+DB0 =os.path.split(DBO_Path)
+DB0 = DB0[1]
+owmode = 'overwrite'
+apmode = 'append'                           
+st = dt.datetime.now()
+sqlCtx,spark=getSparkConfig(SPARK_MASTER, "StageDB0:Masters-Customer")
+def masters_customers():
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
+    ConfTab='tblCompanyName'
     try:
-        CUST_Entity = next (table for table in config["TablesToIngest"] if table["Table"] == "Customer") 
-        table_rename = next (table for table in config["TablesToRename"] if table["Table"] == "Customer") 
-        columns = table_rename["Columns"][0]
-        print(columns)
-        
-        for entityObj in config["DbEntities"]:
-            logger = Logger()
-            entityLocation = entityObj["Location"]
-            print(entityLocation)
-            DBName = entityLocation[:3]
-            EntityName = entityLocation[-2:]
-            hdfspath = STAGE1_PATH + "/" + entityLocation
-            postgresUrl = PostgresDbInfo.url.format(entityLocation)
+        finalDF = spark.createDataFrame([], StructType([]))
+        Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+        CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+        CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+        for d in range(len(DBList)):  
+            DB=DBList[d]
+            logger =Logger()
+            Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+            CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['DBName']==DB))
+            NoofRows = CompanyDetail.count()  
             
-            
-            finalDF = ToDFWitoutPrefix(sqlCtx, hdfspath, CUST_Entity,True)
-            
-            
-            finalDF = finalDF.withColumn('DB',lit(DBName))\
-                    .withColumn('Entity',lit(EntityName))
-            finalDF = finalDF.withColumn('Link Customer Key',concat(finalDF["DB"],lit('|'),finalDF["Entity"],lit('|'),finalDF["No_"]))
-            
-            
-            finalDF = RENAME(finalDF,columns)
-            finalDF.printSchema()
-            
-            finalDF.cache()
-            finalDF.write.jdbc(url=postgresUrl, table="Masters.Customer", mode='overwrite', properties=PostgresDbInfo.props)#PostgresDbInfo.props
-
-            logger.endExecution()
-            
-            try:
-                IDEorBatch = sys.argv[1]
-            except Exception as e :
-                IDEorBatch = "IDLE"
-
-            log_dict = logger.getSuccessLoggedRecord("Customer", DBName, EntityName, finalDF.count(), len(finalDF.columns), IDEorBatch)
-            log_df = spark.createDataFrame(log_dict, logger.getSchema())
-            log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-        
+            for i in range(NoofRows): 
+                
+                    DBName=(CompanyDetail.collect()[i]['DBName'])
+                    EntityName =(CompanyDetail.collect()[i]['NewCompanyName'])
+                    CompanyName=(CompanyDetail.collect()[i]['CompanyName'])
+                    DBE=DBName+EntityName
+                    CompanyName=CompanyName.replace(" ","")
+                    Path = HDFS_PATH+DIR_PATH+"/"+DBName+"/"+EntityName+"/Stage2/ParquetData/Masters/Customer"
+                    fe = fs.exists(spark._jvm.org.apache.hadoop.fs.Path(Path))
+                    if(fe):
+                        finalDF1=spark.read.format("delta").load(Path)
+                        if (d==0) & (i==0):
+                            finalDF=finalDF1
+                            
+                        else:
+                            finalDF=finalDF.unionByName(finalDF1,allowMissingColumns=True)
+                            
+                    else:
+                        print("Customer "+DBName+EntityName+" Does not exist")
+        finalDF.write.jdbc(url=PostgresDbInfo.PostgresUrl , table="Masters.Customer", mode=owmode, properties=PostgresDbInfo.props)
+        logger.endExecution()
+        try:
+            IDEorBatch = sys.argv[1]
+        except Exception as e :
+            IDEorBatch = "IDLE"
+    
+        log_dict = logger.getSuccessLoggedRecord("Masters.Customer", DB0, "", finalDF.count(), len(finalDF.columns), IDEorBatch)
+        log_df = spark.createDataFrame(log_dict, logger.getSchema())
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)                 
     except Exception as ex:
         exc_type,exc_value,exc_traceback=sys.exc_info()
         print("Error:",ex)
@@ -97,28 +84,15 @@ def masters_customers(sqlCtx, spark):
         print("Error Line No. - "+str(exc_traceback.tb_lineno))
         ex = str(ex)
         logger.endExecution()
-
         try:
             IDEorBatch = sys.argv[1]
         except Exception as e :
             IDEorBatch = "IDLE"
-        
-        log_dict = logger.getErrorLoggedRecord('Customer', '', '', str(ex), exc_traceback.tb_lineno, IDEorBatch)
+        DBE=DBName+EntityName
+        os.system("spark-submit "+Kockpit_Path+"\Email.py 1 Customer "+CompanyName+" "" "+str(exc_traceback.tb_lineno)+"")   
+        log_dict = logger.getErrorLoggedRecord('Masters.Customer', DB0, "" , str(ex), exc_traceback.tb_lineno, IDEorBatch)
         log_df = spark.createDataFrame(log_dict, logger.getSchema())
-        log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-    print('masters_customers completed: ' + str((dt.datetime.now()-st).total_seconds()))
-    
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)        
+    print('masters Customer completed: ' + str((dt.datetime.now()-st).total_seconds())) 
 if __name__ == "__main__":
-    sqlCtx, spark = getSparkConfig(SPARK_MASTER, "Stage2:Collection")
-    masters_customers(sqlCtx, spark)
-    '''
-    conf = SparkConf().setMaster(SPARK_MASTER).setAppName("Stage2:Customer")\
-            .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")\
-            .set("spark.sql.broadcastTimeout", "36000")\
-            .set("spark.network.timeout", 10000000)
-
-    sc = SparkContext(conf = conf)
-    sqlCtx = SQLContext(sc)
-    spark = SparkSession.builder.appName("Customer").getOrCreate() #sqlCtx.sparkSession
-    masters_customers(sqlCtx, spark)
-    '''
+    masters_customers()        

@@ -1,84 +1,98 @@
+from pyspark.sql import SparkSession,SQLContext
 from pyspark import SparkConf, SparkContext
-from pyspark.sql import SQLContext, SparkSession,Row
-#from pyspark.sql.functions import *
-from pyspark.sql import functions as f
 from pyspark.sql.types import *
-from pyspark.storagelevel import StorageLevel
-from pyspark.sql.functions import regexp_replace, col, udf, broadcast
-import datetime, time
-import datetime as dt
-import re
-
-from pyspark.sql import functions as F
-import pandas as pd
-import os,sys,subprocess
+import pyspark.sql.functions as F
+import os,sys
 from os.path import dirname, join, abspath
-
-helpersDir = '/home/padmin/KockpitStudio'
-sys.path.insert(0, helpersDir)
-from ConfigurationFiles.AppConfig import *
-from Helpers.Constants import *
-from Helpers.udf import *
-
-def purchase_PurchaseOrder(sqlCtx, spark):
-    st = dt.datetime.now()
-    logger = Logger()
-
+import datetime as dt
+root_directory =abspath(join(join(dirname(__file__), '..'),'..','..','..',))
+root_directory=root_directory+"/"
+DBList=[]
+for folders in os.listdir(root_directory):
+    if os.path.isdir(os.path.join(root_directory,folders)):
+        if 'DB' in folders:
+            if 'DB0' in folders:
+                pass
+            else:
+                DBList.insert(0,folders )
+Connection =abspath(join(join(dirname(__file__), '..'),'..','..','..',DBList[0]))
+sys.path.insert(0, Connection)
+from Configuration.Constant import *
+from Configuration.udf import *
+Abs_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..')) 
+Kockpit_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..'))
+DBO_Path=abspath(join(join(dirname(__file__), '..'),'..','..'))
+DB0 =os.path.split(DBO_Path)
+DB0 = DB0[1]
+owmode = 'overwrite'
+apmode = 'append'                           
+st = dt.datetime.now()
+sqlCtx,spark=getSparkConfig(SPARK_MASTER, "StageDB0:Purchase-PurchaseOrder")
+def purchase_PurchaseOrder():
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
+    ConfTab='tblCompanyName'
     try:
-        
-        phEntity = next (table for table in config["TablesToIngest"] if table["Table"] == "Purchase Header")
-        plEntity = next (table for table in config["TablesToIngest"] if table["Table"] == "Purchase Line") 
-        
-        for entityObj in config["DbEntities"]:
-            logger = Logger()
-            entityLocation = entityObj["Location"]
-            DBName = entityLocation[:3]
-            EntityName = entityLocation[-2:]
-            hdfspath = STAGE1_PATH + "/" + entityLocation
-            postgresUrl = PostgresDbInfo.url.format(entityLocation)
+        finalDF = spark.createDataFrame([], StructType([]))
+        Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+        CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+        CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+        for d in range(len(DBList)):  
+            DB=DBList[d]
+            logger =Logger()
+            Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+            CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['DBName']==DB))
+            NoofRows = CompanyDetail.count()  
             
-            phDF = ToDFWitoutPrefix(sqlCtx, hdfspath, phEntity,True)
-            plDF = ToDFWitoutPrefix(sqlCtx, hdfspath, plEntity,True)
-            #phDF, phPrefix = ToDF(sqlCtx, hdfspath, phEntity)
-            #plDF, plPrefix = ToDF(sqlCtx, hdfspath, plEntity)
-            
-            #cond = [phDF[phPrefix + "No_"] == plDF[plPrefix + "DocumentNo_"]]
-            finalDF = plDF.join(phDF, plDF['DocumentNo_']==phDF['No_'], 'left')
-            
-            finalDF = RenameDuplicateColumns(finalDF)
-            finalDF.cache()
-            finalDF.write.jdbc(url=postgresUrl, table="Purchase.PurchaseOrder", mode='overwrite', properties=PostgresDbInfo.props)#PostgresDbInfo.props
-
-            logger.endExecution()
-            
-            try:
-                IDEorBatch = sys.argv[1]
-            except Exception as e :
-                IDEorBatch = "IDLE"
-
-            log_dict = logger.getSuccessLoggedRecord("Purchase.PurchaseOrder", DBName, EntityName, finalDF.count(), len(finalDF.columns), IDEorBatch)
-            log_df = spark.createDataFrame(log_dict, logger.getSchema())
-            log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-            
+            for i in range(NoofRows): 
+                
+                    DBName=(CompanyDetail.collect()[i]['DBName'])
+                    EntityName =(CompanyDetail.collect()[i]['NewCompanyName'])
+                    CompanyName=(CompanyDetail.collect()[i]['CompanyName'])
+                    DBE=DBName+EntityName
+                    CompanyName=CompanyName.replace(" ","")
+                    Path = HDFS_PATH+DIR_PATH+"/"+DBName+"/"+EntityName+"/Stage2/ParquetData/Purchase/PurchaseOrder"
+                    fe = fs.exists(spark._jvm.org.apache.hadoop.fs.Path(Path))
+                    if(fe):
+                        finalDF1=spark.read.format("delta").load(Path)
+                        if (d==0) & (i==0):
+                            finalDF=finalDF1
+                            
+                        else:
+                            finalDF=finalDF.unionByName(finalDF1,allowMissingColumns=True)
+                            
+                    else:
+                        print("PurchaseOrder "+DBName+EntityName+" Does not exist")
+        finalDF.write.jdbc(url=PostgresDbInfo.PostgresUrl , table="Purchase.PurchaseOrder", mode=owmode, properties=PostgresDbInfo.props)
+        logger.endExecution()
+        try:
+            IDEorBatch = sys.argv[1]
+        except Exception as e :
+            IDEorBatch = "IDLE"
+    
+        log_dict = logger.getSuccessLoggedRecord("Purchase.PurchaseOrder", DB0, "", finalDF.count(), len(finalDF.columns), IDEorBatch)
+        log_df = spark.createDataFrame(log_dict, logger.getSchema())
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)                 
     except Exception as ex:
         exc_type,exc_value,exc_traceback=sys.exc_info()
         print("Error:",ex)
         print("type - "+str(exc_type))
         print("File - "+exc_traceback.tb_frame.f_code.co_filename)
         print("Error Line No. - "+str(exc_traceback.tb_lineno))
-
+        ex = str(ex)
         logger.endExecution()
-
         try:
             IDEorBatch = sys.argv[1]
         except Exception as e :
             IDEorBatch = "IDLE"
-        
-        log_dict = logger.getErrorLoggedRecord('Purchase.PurchaseOrder', DBName, EntityName, str(ex), str(exc_traceback.tb_lineno), IDEorBatch)
+        DBE=DBName+EntityName
+        os.system("spark-submit "+Kockpit_Path+"\Email.py 1 PurchaseOrder "+CompanyName+" "" "+str(exc_traceback.tb_lineno)+"")   
+        log_dict = logger.getErrorLoggedRecord('Purchase.PurchaseOrder', DB0, "" , str(ex), exc_traceback.tb_lineno, IDEorBatch)
         log_df = spark.createDataFrame(log_dict, logger.getSchema())
-        log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-    print('purchase_PurchaseOrder completed: ' + str((dt.datetime.now()-st).total_seconds()))
-     
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)        
+    print('Purchase PurchaseOrder completed: ' + str((dt.datetime.now()-st).total_seconds()))   
 if __name__ == "__main__":
-    sqlCtx, spark = getSparkConfig(SPARK_MASTER, "Stage2:PurchaseOrder")
-    purchase_PurchaseOrder(sqlCtx, spark)
+    purchase_PurchaseOrder()        

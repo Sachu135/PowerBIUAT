@@ -1,76 +1,82 @@
-from pyspark.sql import SparkSession
-from pyspark import SparkContext
-from pyspark.conf import SparkConf
-from pyspark.sql import SQLContext
+from pyspark.sql import SparkSession,SQLContext
+from pyspark import SparkConf, SparkContext
 from pyspark.sql.types import *
-from pyspark.sql.functions import col,lit,concat_ws,max as max_,concat
-from datetime import timedelta, date
-import re,os,datetime,time,sys,traceback
-import pandas as pd
-import os,sys,subprocess
+import pyspark.sql.functions as F
+import os,sys
 from os.path import dirname, join, abspath
-from distutils.command.check import check
+import datetime as dt
+root_directory =abspath(join(join(dirname(__file__), '..'),'..','..','..',))
+root_directory=root_directory+"/"
+DBList=[]
+for folders in os.listdir(root_directory):
+    if os.path.isdir(os.path.join(root_directory,folders)):
+        if 'DB' in folders:
+            if 'DB0' in folders:
+                pass
+            else:
+                DBList.insert(0,folders )
 
-helpersDir = '/home/padmin/KockpitStudio'
-sys.path.insert(0, helpersDir)
-from ConfigurationFiles.AppConfig import *
-from Helpers.Constants import *
-from Helpers.udf import *
-
-def masters_Item(sqlCtx, spark):
-    logger = Logger()
-
+Connection =abspath(join(join(dirname(__file__), '..'),'..','..','..',DBList[0]))
+sys.path.insert(0, Connection)
+from Configuration.Constant import *
+from Configuration.udf import *
+Abs_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..')) 
+Kockpit_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..'))
+DBO_Path=abspath(join(join(dirname(__file__), '..'),'..','..'))
+DB0 =os.path.split(DBO_Path)
+DB0 = DB0[1]
+owmode = 'overwrite'
+apmode = 'append'                           
+st = dt.datetime.now()
+sqlCtx,spark=getSparkConfig(SPARK_MASTER, "StageDB0:Masters-Item")
+def masters_Item():
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
+    ConfTab='tblCompanyName'
     try:
-        ITEM_Entity = next(table for table in config["TablesToIngest"] if table["Table"] == "Item")
-        print(ITEM_Entity)
-        ITEMCAT_Entity = next (table for table in config["TablesToIngest"] if table["Table"] == "Item Category")
-        PRODGROUP_Entity = next (table for table in config["TablesToIngest"] if table["Table"] == "Product Group") 
-        table_rename = next (table for table in config["TablesToRename"] if table["Table"] == "Item")
-        columns = table_rename["Columns"][0]
-        for entityObj in config["DbEntities"]:
-            logger = Logger()
-            entityLocation = entityObj["Location"]
-            DBName = entityLocation[:3]
-            EntityName = entityLocation[-2:]
-            hdfspath = STAGE1_PATH + "/" + entityLocation
-            postgresUrl = PostgresDbInfo.url.format(entityLocation)
-            
-            Item = ToDFWitoutPrefix(sqlCtx, hdfspath, ITEM_Entity,True)
-            Item.show()
-            Item = Item.withColumn("ProductGroupCode",concat_ws("|",Item.ItemCategoryCode,Item.ProductGroupCode))
-            
-            ItemCategory = ToDFWitoutPrefix(sqlCtx, hdfspath, ITEMCAT_Entity,False)
-            ItemCategory = ItemCategory.withColumnRenamed("Code","ItemCategoryCode").withColumnRenamed("Description","ItemCategory")
-            ItemCategory = ItemCategory.select('ItemCategory','ItemCategoryCode')
-            
-            ProductGroup = ToDFWitoutPrefix(sqlCtx, hdfspath, PRODGROUP_Entity,True)
-            ProductGroup = ProductGroup.withColumn("ProductGroupCode",concat_ws("|",ProductGroup.ItemCategoryCode,ProductGroup.Code))
-            ProductGroup = ProductGroup.drop('ItemCategoryCode')\
-                                    .withColumnRenamed('Code','ProductGroup')\
-                                    .withColumnRenamed('Description','ProductGroupDescription')
-            
-            Item = LJOIN(Item,ItemCategory,'ItemCategoryCode')
-            finalDF = LJOIN(Item,ProductGroup,'ProductGroupCode')
-            finalDF.printSchema()
-            finalDF = RENAME(finalDF,columns)
-            finalDF = finalDF.withColumn('DB',lit(DBName))\
-                    .withColumn('Entity',lit(EntityName))
-            finalDF = finalDF.withColumn('Link Item Key',concat(finalDF["DB"],lit('|'),finalDF["Entity"],lit('|'),finalDF["Link Item"]))
-            finalDF.printSchema()
-            
-            finalDF.write.jdbc(url=postgresUrl, table="Masters.Item", mode='overwrite', properties=PostgresDbInfo.props)#PostgresDbInfo.props
-
-            logger.endExecution()
-            
-            try:
-                IDEorBatch = sys.argv[1]
-            except Exception as e :
-                IDEorBatch = "IDLE"
-
-            log_dict = logger.getSuccessLoggedRecord("Item", DBName, EntityName, finalDF.count(), len(finalDF.columns), IDEorBatch)
-            log_df = spark.createDataFrame(log_dict, logger.getSchema())
-            log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
+        finalDF = spark.createDataFrame([], StructType([]))
+        Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+        CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+        CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
         
+        for d in range(len(DBList)):  
+            DB=DBList[d]
+            logger =Logger()
+            Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+            CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['DBName']==DB))
+            NoofRows = CompanyDetail.count()  
+            
+            for i in range(NoofRows): 
+                
+                    DBName=(CompanyDetail.collect()[i]['DBName'])
+                    EntityName =(CompanyDetail.collect()[i]['NewCompanyName'])
+                    CompanyName=(CompanyDetail.collect()[i]['CompanyName'])
+                    DBE=DBName+EntityName
+                    CompanyName=CompanyName.replace(" ","")
+                    Path = HDFS_PATH+DIR_PATH+"/"+DBName+"/"+EntityName+"/Stage2/ParquetData/Masters/Item"
+                    fe = fs.exists(spark._jvm.org.apache.hadoop.fs.Path(Path))
+                    if(fe):
+                        finalDF1=spark.read.format("delta").load(Path)
+                        if (d==0) & (i==0):
+                            finalDF=finalDF1
+                        else:
+                            finalDF=finalDF.unionByName(finalDF1,allowMissingColumns=True)
+                            
+                    else:
+                        print("Item "+DBName+EntityName+" Does not exist")
+        finalDF.write.jdbc(url=PostgresDbInfo.PostgresUrl , table="Masters.Item", mode=owmode, properties=PostgresDbInfo.props)
+        logger.endExecution()
+        try:
+            IDEorBatch = sys.argv[1]
+        except Exception as e :
+            IDEorBatch = "IDLE"
+    
+        log_dict = logger.getSuccessLoggedRecord("Masters.Item", DB0, "", finalDF.count(), len(finalDF.columns), IDEorBatch)
+        log_df = spark.createDataFrame(log_dict, logger.getSchema())
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)                 
     except Exception as ex:
         exc_type,exc_value,exc_traceback=sys.exc_info()
         print("Error:",ex)
@@ -79,18 +85,15 @@ def masters_Item(sqlCtx, spark):
         print("Error Line No. - "+str(exc_traceback.tb_lineno))
         ex = str(ex)
         logger.endExecution()
-
         try:
             IDEorBatch = sys.argv[1]
         except Exception as e :
             IDEorBatch = "IDLE"
-        
-        log_dict = logger.getErrorLoggedRecord('Item', '', '', str(ex), exc_traceback.tb_lineno, IDEorBatch)
+        DBE=DBName+EntityName
+        os.system("spark-submit "+Kockpit_Path+"/Email.py 1 Item "+CompanyName+" "" "+str(exc_traceback.tb_lineno)+"")   
+        log_dict = logger.getErrorLoggedRecord('Masters.Item', DB0, "" , str(ex), exc_traceback.tb_lineno, IDEorBatch)
         log_df = spark.createDataFrame(log_dict, logger.getSchema())
-        log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-            
-
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)        
+    print('masters Item completed: ' + str((dt.datetime.now()-st).total_seconds()))
 if __name__ == "__main__":
-    sqlCtx, spark = getSparkConfig(SPARK_MASTER, "Stage2:Item")
-    masters_Item(sqlCtx, spark)
-    
+    masters_Item()      

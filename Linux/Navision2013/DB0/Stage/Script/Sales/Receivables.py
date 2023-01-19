@@ -1,80 +1,81 @@
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession,SQLContext
 from pyspark import SparkConf, SparkContext
-from pyspark.sql import SQLContext
-import csv, io,re,keyring,os,datetime
-from datetime import timedelta, date
-from pyspark.sql.functions import col,min as min_,max as max_,concat,concat_ws,year,when,month,to_date,lit,quarter,expr,sum,last_day,datediff,ltrim
-import datetime,time,sys,calendar
 from pyspark.sql.types import *
-import re, logging
-from builtins import str
-import pandas as pd
-import os,sys,subprocess
+import pyspark.sql.functions as F
+import os,sys
 from os.path import dirname, join, abspath
-from distutils.command.check import check
 import datetime as dt
-
-helpersDir = '/home/padmin/KockpitStudio'
-sys.path.insert(0, helpersDir)
-from ConfigurationFiles.AppConfig import *
-from Helpers.Constants import *
-from Helpers.udf import *
-from Helpers import udf as Kockpit
-
-def sales_Receivables(sqlCtx, spark):
-    st = dt.datetime.now()
-    logger = Logger()
-
+root_directory =abspath(join(join(dirname(__file__), '..'),'..','..','..',))
+root_directory=root_directory+"/"
+DBList=[]
+for folders in os.listdir(root_directory):
+    if os.path.isdir(os.path.join(root_directory,folders)):
+        if 'DB' in folders:
+            if 'DB0' in folders:
+                pass
+            else:
+                DBList.insert(0,folders )
+Connection =abspath(join(join(dirname(__file__), '..'),'..','..','..',DBList[0]))
+sys.path.insert(0, Connection)
+from Configuration.Constant import *
+from Configuration.udf import *
+Abs_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..')) 
+Kockpit_Path =abspath(join(join(dirname(__file__), '..'),'..','..','..'))
+DBO_Path=abspath(join(join(dirname(__file__), '..'),'..','..'))
+DB0 =os.path.split(DBO_Path)
+DB0 = DB0[1]
+owmode = 'overwrite'
+apmode = 'append'                           
+st = dt.datetime.now()
+sqlCtx,spark=getSparkConfig(SPARK_MASTER, "StageDB0:Sales-Receivables")
+def sales_Receivables():
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
+    ConfTab='tblCompanyName'
     try:
-        CLE_Entity = next (table for table in config["TablesToIngest"] if table["Table"] == "Cust_ Ledger Entry")
-        SIH_Entity = next (table for table in config["TablesToIngest"] if table["Table"] == "Sales Invoice Header")
-        DCLE_Entity = next (table for table in config["TablesToIngest"] if table["Table"] == "Detailed Cust_ Ledg_ Entry")
-        CPG_Entity = next (table for table in config["TablesToIngest"] if table["Table"] == "Customer Posting Group")  
-        
-        for entityObj in config["DbEntities"]:
-            logger = Logger()
-            entityLocation = entityObj["Location"]
-            DBName = entityLocation[:3]
-            EntityName = entityLocation[-2:]
-            hdfspath = STAGE1_PATH + "/" + entityLocation
-            postgresUrl = PostgresDbInfo.url.format(entityLocation)
+        finalDF = spark.createDataFrame([], StructType([]))
+        Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+        CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+        CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+        for d in range(len(DBList)):  
+            DB=DBList[d]
+            logger =Logger()
+            Query="(SELECT *\
+                        FROM "+ConfiguratorDbInfo.Schema+"."+chr(34)+ConfTab+chr(34)+") AS df"
+            CompanyDetail = spark.read.format("jdbc").options(url=ConfiguratorDbInfo.PostgresUrl, dbtable=Query,user=ConfiguratorDbInfo.props["user"],password=ConfiguratorDbInfo.props["password"],driver= ConfiguratorDbInfo.props["driver"]).load()
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['ActiveCompany']=='true'))
+            CompanyDetail=CompanyDetail.filter((CompanyDetail['DBName']==DB))
+            NoofRows = CompanyDetail.count()  
             
-            CLE = ToDFWitoutPrefix(sqlCtx, hdfspath, CLE_Entity,True)
-            CLE = CLE.withColumnRenamed('DocumentNo_','CLE_Document_No')
-            SIH = ToDFWitoutPrefix(sqlCtx, hdfspath, SIH_Entity,False)
-            SIH = SIH.select('No_','PaymentTermsCode').withColumnRenamed('No_','CLE_Document_No')
-            DCLE = ToDFWitoutPrefix(sqlCtx, hdfspath, DCLE_Entity,True)
-            CPG = ToDFWitoutPrefix(sqlCtx, hdfspath, CPG_Entity,False)
-            CPG = CPG.select('Code','ReceivablesAccount').withColumnRenamed('Code','CustomerPostingGroup')\
-                        .withColumnRenamed('ReceivablesAccount','GLAccount')
-            
-            cond = [CLE["EntryNo_"] == DCLE["Cust_LedgerEntryNo_"]]
-            finalDF = DCLE.join(CLE, cond, 'left')
-            
-            finalDF = finalDF.join(SIH, 'CLE_Document_No', 'left')
-            finalDF = finalDF.join(CPG,'CustomerPostingGroup','left')
-            
-            DSE = sqlCtx.read.parquet(hdfspath + "/DSE").drop("DBName","EntityName")
-            finalDF = finalDF.join(DSE,"DimensionSetID",'left')
-            
-            #ARsnapshots = ARsnapshots.withColumn("AdvanceFlag",when(ARsnapshots["AdvanceCollection"]==1,lit('Advance')).otherwise(lit('NA')))
-            
-            finalDF = Kockpit.RenameDuplicateColumns(finalDF)
-            
-            finalDF.cache()
-            finalDF.write.jdbc(url=postgresUrl, table="Sales.Receivables", mode='overwrite', properties=PostgresDbInfo.props)#PostgresDbInfo.props
-
-            logger.endExecution()
-            
-            try:
-                IDEorBatch = sys.argv[1]
-            except Exception as e :
-                IDEorBatch = "IDLE"
-
-            log_dict = logger.getSuccessLoggedRecord("Sales.Receivables", DBName, EntityName, finalDF.count(), len(finalDF.columns), IDEorBatch)
-            log_df = spark.createDataFrame(log_dict, logger.getSchema())
-            log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-        
+            for i in range(NoofRows): 
+                
+                    DBName=(CompanyDetail.collect()[i]['DBName'])
+                    EntityName =(CompanyDetail.collect()[i]['NewCompanyName'])
+                    CompanyName=(CompanyDetail.collect()[i]['CompanyName'])
+                    DBE=DBName+EntityName
+                    CompanyName=CompanyName.replace(" ","")
+                    Path = HDFS_PATH+DIR_PATH+"/"+DBName+"/"+EntityName+"/Stage2/ParquetData/Sales/Receivables"
+                    fe = fs.exists(spark._jvm.org.apache.hadoop.fs.Path(Path))
+                    if(fe):
+                        finalDF1=spark.read.format("delta").load(Path)
+                        if (d==0) & (i==0):
+                            finalDF=finalDF1
+                            
+                        else:
+                            finalDF=finalDF.unionByName(finalDF1,allowMissingColumns=True)
+                            
+                    else:
+                        print("Receivables "+DBName+EntityName+" Does not exist")
+        finalDF.write.jdbc(url=PostgresDbInfo.PostgresUrl , table="Sales.Receivables", mode=owmode, properties=PostgresDbInfo.props)
+        logger.endExecution()
+        try:
+            IDEorBatch = sys.argv[1]
+        except Exception as e :
+            IDEorBatch = "IDLE"
+    
+        log_dict = logger.getSuccessLoggedRecord("Sales.Receivables", DB0, "", finalDF.count(), len(finalDF.columns), IDEorBatch)
+        log_df = spark.createDataFrame(log_dict, logger.getSchema())
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)                 
     except Exception as ex:
         exc_type,exc_value,exc_traceback=sys.exc_info()
         print("Error:",ex)
@@ -83,18 +84,15 @@ def sales_Receivables(sqlCtx, spark):
         print("Error Line No. - "+str(exc_traceback.tb_lineno))
         ex = str(ex)
         logger.endExecution()
-
         try:
             IDEorBatch = sys.argv[1]
         except Exception as e :
             IDEorBatch = "IDLE"
-        
-        log_dict = logger.getErrorLoggedRecord('Sales.Receivables', DBName, EntityName, str(ex), str(exc_traceback.tb_lineno), IDEorBatch)
+        DBE=DBName+EntityName
+        os.system("spark-submit "+Kockpit_Path+"\Email.py 1 Receivables "+CompanyName+" "" "+str(exc_traceback.tb_lineno)+"")   
+        log_dict = logger.getErrorLoggedRecord('Sales.Receivables', DB0, "" , str(ex), exc_traceback.tb_lineno, IDEorBatch)
         log_df = spark.createDataFrame(log_dict, logger.getSchema())
-        log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
-    print('sales_Receivables completed: ' + str((dt.datetime.now()-st).total_seconds()))
-    
+        log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)        
+    print('Sales Receivables completed: ' + str((dt.datetime.now()-st).total_seconds()))      
 if __name__ == "__main__":
-    sqlCtx, spark = getSparkConfig(SPARK_MASTER, "Stage2:Receivables")
-    sales_Receivables(sqlCtx, spark)
-pyth
+    sales_Receivables()  

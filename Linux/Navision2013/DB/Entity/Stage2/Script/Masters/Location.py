@@ -1,87 +1,82 @@
+from pyspark.sql import SparkSession,SQLContext
 from pyspark import SparkConf, SparkContext
-from pyspark.sql import SQLContext, SparkSession,Row
-#from pyspark.sql.functions import *
-from pyspark.sql import functions as f
+from pyspark.sql.functions import lit, concat
 from pyspark.sql.types import *
-from pyspark.storagelevel import StorageLevel
-from pyspark.sql.functions import regexp_replace, udf, broadcast,col,max as max_,concat,concat_ws,year,when,month,to_date,lit,quarter,expr,sum,datediff,length,ltrim
-
-import datetime, time
-import datetime as dt
-import re
-
-from pyspark.sql import functions as F
-import pandas as pd
-import os,sys,subprocess
+import pyspark.sql.functions as F
+import os,sys
 from os.path import dirname, join, abspath
-
-helpersDir = '/home/padmin/KockpitStudio'
-sys.path.insert(0, helpersDir)
-from ConfigurationFiles.AppConfig import *
-from Helpers.Constants import *
-from Helpers.udf import *
-
-
-def masters_Location(sqlCtx, spark):
-    st = dt.datetime.now()
-    logger = Logger()
-
-    try:
-        
-        lEntity = next (table for table in config["TablesToIngest"] if table["Table"] == "Location")
-        table_rename = next (table for table in config["TablesToRename"] if table["Table"] == "Location")
-        columns = table_rename["Columns"][0]
-        for entityObj in config["DbEntities"]:
-            logger = Logger()
-            
-            entityLocation = entityObj["Location"]
-            DBName = entityLocation[:3]
-            EntityName = entityLocation[-2:]
-            hdfspath = STAGE1_PATH + "/" + entityLocation
-            postgresUrl = PostgresDbInfo.url.format(entityLocation)
-            
-            finalDF = ToDFWitoutPrefix(sqlCtx, hdfspath, lEntity, True)
-            finalDF.printSchema()
-            finalDF = RENAME(finalDF,columns)
-            finalDF.printSchema()
-            
-            finalDF = finalDF.withColumn('DB',lit(DBName))\
-                    .withColumn('Entity',lit(EntityName))
-            finalDF = finalDF.withColumn('Link Location Key',concat(finalDF["DB"],lit('|'),finalDF["Entity"],lit('|'),finalDF["Link Location"]))
-            finalDF.printSchema()
-            
-            finalDF.write.jdbc(url=postgresUrl, table="masters.Location", mode='overwrite', properties=PostgresDbInfo.props)#PostgresDbInfo.props
-
-            logger.endExecution()
-            
+import datetime as dt 
+from builtins import str
+st = dt.datetime.now()
+Kockpit_Path =abspath(join(join(dirname(__file__),'..','..','..','..','..')))
+DB_path =abspath(join(join(dirname(__file__),'..','..','..','..')))
+sys.path.insert(0,'../../')
+sys.path.insert(0, DB_path)
+from Configuration.AppConfig import * 
+from Configuration.Constant import *
+from Configuration.udf import *
+from Configuration import udf as Kockpit
+Filepath = os.path.dirname(os.path.abspath(__file__))
+FilePathSplit = Filepath.split('/')
+DBName = FilePathSplit[-5]
+EntityName = FilePathSplit[-4]
+DBEntity = DBName+EntityName
+STAGE1_Configurator_Path=HDFS_PATH+DIR_PATH+"/" +DBName+"/" +EntityName+"/" +"Stage1/ConfiguratorData/"
+STAGE1_PATH=HDFS_PATH+DIR_PATH+"/" +DBName+"/" +EntityName+"/" +"Stage1/ParquetData"
+STAGE2_PATH=HDFS_PATH+DIR_PATH+"/" +DBName+"/" +EntityName+"/" +"Stage2/ParquetData"
+sqlCtx,spark=getSparkConfig(SPARK_MASTER, "Stage2:Masters-Location")
+import delta
+from delta.tables import *
+def masters_Location():
+    for dbe in config["DbEntities"]:
+        if dbe['ActiveInactive']=='true' and  dbe['Location']==DBEntity:
+            CompanyName=dbe['Name']
+            CompanyName=CompanyName.replace(" ","")
             try:
-                IDEorBatch = sys.argv[1]
-            except Exception as e :
-                IDEorBatch = "IDLE"
-
-            log_dict = logger.getSuccessLoggedRecord("masters.Location", entityLocation, entityLocation, finalDF.count(), len(finalDF.columns), IDEorBatch)
-            log_df = spark.createDataFrame(log_dict, logger.getSchema())
-            log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
+                logger = Logger()
+                finalDF=spark.read.format("delta").load(STAGE1_PATH+"/Location" )
+                finalDF = RENAME(finalDF,{"Code":"Link Location","Name":"Location Name","City":"Location City","PostCode":"Location Post Code","StateCode":"Location State Code","Country_RegionCode":"Location Country Region Code"})  
+                finalDF=finalDF.withColumn("DBName",concat(lit(DBName))).withColumn("EntityName",concat(lit(EntityName)))
+                finalDF = finalDF.withColumn('Link Location Key',concat(finalDF["DBName"],lit('|'),finalDF["EntityName"],lit('|'),finalDF["Link Location"]))                
+                result_df = finalDF.select([F.col(col).alias(col.replace(" ","")) for col in finalDF.columns])
+                result_df = result_df.select([F.col(col).alias(col.replace("(","")) for col in result_df.columns])
+                result_df = result_df.select([F.col(col).alias(col.replace(")","")) for col in result_df.columns])
+                result_df.write.option("maxRecordsPerFile", 10000).format("delta").mode("overwrite").option("overwriteSchema", "true").save(STAGE2_PATH+"/"+"Masters/Location")
+                
+                logger.endExecution()
+                try:
+                    IDEorBatch = sys.argv[1]
+                except Exception as e :
+                    IDEorBatch = "IDLE"
             
-    except Exception as ex:
-        exc_type,exc_value,exc_traceback=sys.exc_info()
-        print("Error:",ex)
-        print("type - "+str(exc_type))
-        print("File - "+exc_traceback.tb_frame.f_code.co_filename)
-        print("Error Line No. - "+str(exc_traceback.tb_lineno))
-
-        logger.endExecution()
-
-        try:
-            IDEorBatch = sys.argv[1]
-        except Exception as e :
-            IDEorBatch = "IDLE"
-        
-        log_dict = logger.getErrorLoggedRecord('masters.Location', '', '', ex, exc_traceback.tb_lineno, IDEorBatch)
-        log_df = spark.createDataFrame(log_dict, logger.getSchema())
-        log_df.write.jdbc(url=PostgresDbInfo.logsDbUrl, table="logtable", mode='append', properties=PostgresDbInfo.props)
+                log_dict = logger.getSuccessLoggedRecord("Location", DBName, EntityName, result_df.count(), len(result_df.columns), IDEorBatch)
+                log_df = spark.createDataFrame(log_dict, logger.getSchema())
+                log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)            
+            except Exception as ex:
+                exc_type,exc_value,exc_traceback=sys.exc_info()
+                print("Error:",ex)
+                print("type - "+str(exc_type))
+                print("File - "+exc_traceback.tb_frame.f_code.co_filename)
+                print("Error Line No. - "+str(exc_traceback.tb_lineno))
+               
+                logger.endExecution()
+                try:
+                    IDEorBatch = sys.argv[1]
+                except Exception as e :
+                    IDEorBatch = "IDLE"
+                os.system("spark-submit "+Kockpit_Path+"/Email.py 1 Location '"+CompanyName+"' "+DBEntity+" "+str(exc_traceback.tb_lineno)+"")   
+                log_dict = logger.getErrorLoggedRecord('Location', '', '', str(ex), exc_traceback.tb_lineno, IDEorBatch)
+                log_df = spark.createDataFrame(log_dict, logger.getSchema())
+                log_df.write.jdbc(url=PostgresDbInfo.PostgresUrl, table="logs.logs", mode='append', properties=PostgresDbInfo.props)        
     print('masters_Location completed: ' + str((dt.datetime.now()-st).total_seconds()))
-    
+def vacuum_Location():
+                    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
+                    vacuum_Path=STAGE2_PATH+"/"+"Masters/Location"
+                    fe = fs.exists(spark._jvm.org.apache.hadoop.fs.Path(vacuum_Path))
+                    if (fe):
+                        dtTable=DeltaTable.forPath(spark, vacuum_Path)
+                        dtTable.vacuum(1)
+                    else:
+                        print("HDFS Path Does Not Exist") 
 if __name__ == "__main__":
-    sqlCtx, spark = getSparkConfig(SPARK_MASTER, "Stage2:Location")
-    masters_Location(sqlCtx, spark)
+    masters_Location()

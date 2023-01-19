@@ -1,7 +1,3 @@
-#Date: 21 Jan 2020
-#Dev: Kamal@Kockpit
-#Ver: 0.1
-#Info: It contains all user defined functions for different transformations in pyspark(spark-2.4)
 from pyspark import SparkConf, SparkContext
 from pyspark.sql import SQLContext, SparkSession,Row
 from pyspark.conf import SparkConf
@@ -12,7 +8,8 @@ import re,os,datetime,time,sys,traceback
 from datetime import timedelta, date
 from pyspark.sql.functions import col,max as max_,concat,concat_ws,year,when,month,to_date,lit,quarter,expr,sum,count,desc,round,split,last_day,udf,length,explode,split,regexp_replace
 from Configuration import AppConfig as ac
-#from delta.tables import *
+from enum import Flag
+
 
 __all__ = ['JOIN','LJOIN','RJOIN','FULL','RENAME','MONTHSDF','LASTDAY','DRANGE','CONCATENATE',
 	  'UNREDUCE','UNALL','BUCKET', 'ToDF', 'ToDFWitoutPrefix', 'ToTrimmedColumnsDF', 'RenameDuplicateColumns','getSparkConfig','getSparkConfig4g']
@@ -290,26 +287,7 @@ def RenameDuplicateColumns(dataframe):
 	dataframe = dataframe.toDF(*newNames)
 	return dataframe
 	
-def getSparkConfig(master, appName):
-	conf = SparkConf().setMaster(master).setAppName(appName)\
-		.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")\
-		.set("spark.sql.broadcastTimeout", "36000")\
-		.set("spark.kryoserializer.buffer.max","512m")\
-		.set("spark.driver.memory","8g")\
-		.set("spark.executor.memory","24g")\
-		.set("spark.driver.maxResultSize","20g")\
-		.set("spark.sql.debug.maxToStringFields","500")\
-		.set("spark.network.timeout", 10000000)\
-		.set("spark.memory.offHeap.enabled",'true')\
-     	.set("spark.memory.offHeap.size","40g")\
-		.set("spark.jars.packages", "io.delta:delta-core_2.12:0.7.0")\
-		.set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")\
-		.set("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
 
-	sc = SparkContext(conf = conf)
-	sqlCtx = SQLContext(sc)
-	spark = SparkSession.builder.appName(appName).getOrCreate() #sqlCtx.sparkSession #SparkSession.builder.appName("Item").getOrCreate() #
-	return sqlCtx, spark
 	
 def getSparkConfig4g(master, appName):
 	conf = SparkConf().setMaster(master).setAppName(appName)\
@@ -342,10 +320,19 @@ def last_day_of_month(date):
 def daterange(start_date, end_date):
         for n in range(int ((end_date - start_date).days)):
             yield start_date + timedelta(n)
-def addColumnIndex(df):
-        newSchema = StructType(df.schema.fields +[StructField("id",IntegerType(),False),])
-        #print(newSchema)
-        df_added = df.rdd.zipWithIndex().map(lambda row:row[0]+(row[1],)).toDF(newSchema)
+def addColumnIndex(df,sqlCtx):
+        #newSchema = StructType(df.schema.fields +[StructField("id",IntegerType(),False),])
+        #df_added = df.rdd.zipWithIndex().map(lambda row:row[0]+(row[1],)).toDF(newSchema)
+        PandasDF = df.toPandas()
+        list_data = PandasDF.values.tolist()
+        columns = df.columns + ['id']
+        #print(columns)
+        #list_data = [row for row in df.collect()]
+        #list_data = [df.select(df.columns).rdd.flatMap(lambda x: x).collect()]
+        #print(list_data)
+        #sys.exit()
+        indexed = [(*cols, i+1) for i, cols in enumerate(list_data)]
+        df_added = sqlCtx.createDataFrame(indexed,columns)
         return df_added
 def split_dataframe(df,seperate,target_col,new_col):#seperates the elements of the target columns according to seperator
         df = df.withColumn(new_col, split(target_col, seperate))
@@ -363,10 +350,10 @@ def only_minus(df,seperate,target_col,new_col,sqlCtx):
                     flag.append(-1)
 
         flag_df = sqlCtx.createDataFrame(flag, IntegerType())
-        flag_df = addColumnIndex(flag_df)
+        flag_df = addColumnIndex(flag_df,sqlCtx)
         flag_df = flag_df.withColumnRenamed('value','Neg_Flag')
         df_minus = df_minus.withColumn(new_col, explode(df_minus.Totaling))
-        df_minus = addColumnIndex(df_minus)
+        df_minus = addColumnIndex(df_minus,sqlCtx)
         df_minus=df_minus.join(flag_df,df_minus.id==flag_df.id)
         df_minus = df_minus.drop('id')
         df_minus = df_minus.sort('LineNo_')
@@ -384,10 +371,14 @@ def divide(df,seperate,target_col,new_col,sqlCtx):
                 for i in range(1,len(j)):
                     divide_flag.append("D")
         flag_df = sqlCtx.createDataFrame(divide_flag, StringType())
-        flag_df = addColumnIndex(flag_df)
+        #from pyspark.sql.functions import desc, row_number, monotonically_increasing_id
+        #from pyspark.sql.window import Window
+        #flag_df = flag_df.withColumn('id', row_number().over(Window.orderBy(monotonically_increasing_id())) - 1)
+        flag_df = addColumnIndex(flag_df,sqlCtx)
+        
         flag_df = flag_df.withColumnRenamed('value','Divisor_Flag')
         df_divide = df_divide.withColumn(new_col, explode(df_divide.Totaling))
-        df_divide = addColumnIndex(df_divide)
+        df_divide = addColumnIndex(df_divide,sqlCtx)
         df_divide = df_divide.join(flag_df,df_divide.id==flag_df.id).drop('id')
         return df_divide       
 def plus(df,seperate,target_col,new_col):
@@ -397,6 +388,14 @@ def plus(df,seperate,target_col,new_col):
         return df_plus       
        
 #Customer Segmentation udfs
+def last_day_of_month(date):
+        if date.month == 12:
+                return date.replace(day=31)
+        return date.replace(month=date.month+1, day=1) - datetime.timedelta(days=1)
+            
+def daterange(start_date,end_date):
+        for n in range(int ((end_date - start_date).days)):
+                 yield start_date + timedelta(n)
 
 def r_score(x):
     if x <= quintiles['Recency'][.2]:
@@ -423,10 +422,31 @@ def fm_score(x,c):
         return 5    
        
        
-       
-       
+def getSparkConfig(master, appName):
+	conf = SparkConf().setMaster(master).setAppName(appName).\
+                    set("spark.sql.shuffle.partitions",16).\
+                    set("spark.serializer", "org.apache.spark.serializer.KryoSerializer").\
+                    set("spark.local.dir", "/tmp/spark-temp").\
+                    set("spark.driver.memory","30g").\
+                    set("spark.executor.memory","30g").\
+                    set("spark.driver.cores",16).\
+                    set("spark.driver.maxResultSize","0").\
+                    set("spark.sql.debug.maxToStringFields", "1000").\
+                    set("spark.executor.instances", "20").\
+                    set('spark.scheduler.mode', 'FAIR').\
+                    set("spark.sql.broadcastTimeout", "36000").\
+                    set("spark.network.timeout", 10000000).\
+                    set("spark.sql.legacy.parquet.datetimeRebaseModeInWrite", "LEGACY").\
+                    set("spark.sql.legacy.parquet.datetimeRebaseModeInRead", "LEGACY").\
+                    set("spark.sql.legacy.parquet.datetimeRebaseModeInRead", "CORRECTED").\
+                    set("spark.sql.legacy.timeParserPolicy","LEGACY").\
+                    set("spark.sql.legacy.parquet.int96RebaseModeInWrite","LEGACY").\
+                    set("spark.sql.legacy.parquet.int96RebaseModeInWrite","CORRECTED")
 
-    
+	sc = SparkContext.getOrCreate(conf = conf)
+	sqlCtx = SQLContext(sc)
+	spark = SparkSession.builder.appName(appName).getOrCreate() #sqlCtx.sparkSession #SparkSession.builder.appName("Item").getOrCreate() #
+	return sqlCtx, spark
 
        
        
